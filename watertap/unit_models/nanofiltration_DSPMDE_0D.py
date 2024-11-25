@@ -100,6 +100,31 @@ class NanofiltrationDSPMDE0DScaler(CustomScalerBase):
             source_state=model.feed_side.properties_in,
             overwrite=overwrite,
         )
+        self.propagate_state_scaling(
+            target_state=model.mixed_permeate,
+            source_state=model.feed_side.properties_in,
+            overwrite=overwrite,
+        )
+        self._prop_state(
+            target_state=model.permeate_side,
+            source_state=model.feed_side.properties_in,
+            overwrite=overwrite,
+        )
+        self._prop_state(
+            target_state=model.feed_side.properties_interface,
+            source_state=model.feed_side.properties_in,
+            overwrite=overwrite,
+        )
+        self._prop_state(
+            target_state=model.pore_entrance,
+            source_state=model.feed_side.properties_in,
+            overwrite=overwrite,
+        )
+        self._prop_state(
+            target_state=model.pore_exit,
+            source_state=model.feed_side.properties_in,
+            overwrite=overwrite,
+        )
 
         self.call_submodel_scaler_method(
             submodel=model.feed_side.properties_out,
@@ -198,6 +223,19 @@ class NanofiltrationDSPMDE0DScaler(CustomScalerBase):
                 scheme=ConstraintScalingScheme.inverseMaximum,
                 overwrite=overwrite,
             )
+
+    def _prop_state(self, target_state, source_state, overwrite=False):
+        for (t, bidx), target_data in target_state.items():
+            target_vars = target_data.define_state_vars()
+            source_vars = source_state[t].define_state_vars()
+
+            for state, var in target_vars.items():
+                for vidx, vardata in var.items():
+                    self.scale_variable_by_component(
+                        target_variable=vardata,
+                        scaling_component=source_vars[state][vidx],
+                        overwrite=overwrite,
+                    )
 
     # def calculate_scaling_factors(self):
     #     super().calculate_scaling_factors()
