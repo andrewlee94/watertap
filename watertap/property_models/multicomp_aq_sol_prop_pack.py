@@ -77,6 +77,7 @@ from idaes.core.util.exceptions import (
 )
 import idaes.core.util.scaling as iscale
 from idaes.core.scaling import CustomScalerBase, ConstraintScalingScheme
+from idaes.core.initialization import BlockTriangularizationInitializer
 
 from watertap.core.solvers import get_solver
 from watertap.core.util.scaling import transform_property_constraints
@@ -933,7 +934,18 @@ class _MCASStateBlock(StateBlock):
     than individual elements of indexed Property Blocks.
     """
 
+    default_initializer = BlockTriangularizationInitializer
     default_scaler = MCASScaler
+
+    def fix_initialization_states(self):
+        """
+        Fixes state variables for state blocks.
+
+        Returns:
+            None
+        """
+        # Fix state variables
+        fix_state_vars(self)
 
     def initialize(
         self,

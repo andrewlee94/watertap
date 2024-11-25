@@ -2555,7 +2555,7 @@ class TestMCASScaler:
             getattr(stream[0], v.name)
             assert stream[0].is_property_constructed(v.name)
 
-        stream.initialize()
+        stream.default_initializer().initialize(stream)
 
         scaler = stream.default_scaler()
         assert isinstance(scaler, MCASScaler)
