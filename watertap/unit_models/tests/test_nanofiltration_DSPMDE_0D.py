@@ -13,7 +13,7 @@
 import pytest
 import numpy as np
 from math import log
-import idaes.logger as idaeslog
+
 from pyomo.environ import (
     ConcreteModel,
     Constraint,
@@ -26,26 +26,14 @@ from pyomo.environ import (
 from pyomo.network import Arc
 from pyomo.util.check_units import assert_units_consistent
 from pyomo.network import Port
+
+import idaes.logger as idaeslog
 from idaes.core import (
     FlowsheetBlock,
     MaterialBalanceType,
     MomentumBalanceType,
     ControlVolume0DBlock,
 )
-from watertap.property_models.multicomp_aq_sol_prop_pack import (
-    MCASParameterBlock,
-    ActivityCoefficientModel,
-    DensityCalculation,
-    MCASStateBlock,
-)
-from watertap.unit_models.nanofiltration_DSPMDE_0D import (
-    NanofiltrationDSPMDE0D,
-    MassTransferCoefficient,
-    ConcentrationPolarizationType,
-)
-from watertap.core.util.initialization import check_dof
-
-from watertap.core.solvers import get_solver
 from idaes.core.util.model_statistics import (
     number_variables,
     number_total_constraints,
@@ -62,7 +50,21 @@ from idaes.core.util.initialization import propagate_state
 from idaes.models.unit_models import (
     Feed,
 )
-import idaes.logger as idaeslog
+
+from watertap.property_models.multicomp_aq_sol_prop_pack import (
+    MCASParameterBlock,
+    ActivityCoefficientModel,
+    DensityCalculation,
+    MCASStateBlock,
+)
+from watertap.unit_models.nanofiltration_DSPMDE_0D import (
+    NanofiltrationDSPMDE0D,
+    NanofiltrationDSPMDE0DScaler,
+    MassTransferCoefficient,
+    ConcentrationPolarizationType,
+)
+from watertap.core.util.initialization import check_dof
+from watertap.core.solvers import get_solver
 
 # -----------------------------------------------------------------------------
 # Get default solver for testing
@@ -1952,3 +1954,117 @@ def test_pressure_recovery_step_5_ions():
         m.fs.nfUnit.recovery_vol_phase.fix(r)
         res = solver.solve(m, tee=True)
         assert_optimal_termination(res)
+
+
+class TestNFScaler:
+    @pytest.mark.component
+    def test_scaler(self):
+        m = ConcreteModel()
+        m.fs = FlowsheetBlock(dynamic=False)
+        m.fs.properties = MCASParameterBlock(
+            solute_list=["Ca_2+", "SO4_2-", "Mg_2+", "Na_+", "Cl_-"],
+            diffusivity_data={
+                ("Liq", "Ca_2+"): 9.2e-10,
+                ("Liq", "SO4_2-"): 1.06e-09,
+                ("Liq", "Mg_2+"): 7.06e-10,
+                ("Liq", "Na_+"): 1.33e-09,
+                ("Liq", "Cl_-"): 2.03e-09,
+            },
+            mw_data={
+                "H2O": 0.018,
+                "Ca_2+": 0.04,
+                "Mg_2+": 0.024,
+                "SO4_2-": 0.096,
+                "Na_+": 0.023,
+                "Cl_-": 0.035,
+            },
+            stokes_radius_data={
+                "Ca_2+": 3.09e-10,
+                "Mg_2+": 3.47e-10,
+                "SO4_2-": 2.3e-10,
+                "Cl_-": 1.21e-10,
+                "Na_+": 1.84e-10,
+            },
+            charge={"Ca_2+": 2, "Mg_2+": 2, "SO4_2-": -2, "Na_+": 1, "Cl_-": -1},
+            activity_coefficient_model=ActivityCoefficientModel.davies,
+            density_calculation=DensityCalculation.constant,
+        )
+
+        m.fs.unit = NanofiltrationDSPMDE0D(property_package=m.fs.properties)
+
+        mass_flow_in = 1 * pyunits.kg / pyunits.s
+        feed_mass_frac = {
+            "Ca_2+": 382e-6,
+            "Mg_2+": 1394e-6,
+            "SO4_2-": 2136e-6,
+            "Cl_-": 20101.6e-6,
+            "Na_+": 11122e-6,
+        }
+
+        # Fix mole flow rates of each ion and water
+        for ion, x in feed_mass_frac.items():
+            mol_comp_flow = (
+                    x
+                    * pyunits.kg
+                    / pyunits.kg
+                    * mass_flow_in
+                    / m.fs.unit.feed_side.properties_in[0].mw_comp[ion]
+            )
+            m.fs.unit.inlet.flow_mol_phase_comp[0, "Liq", ion].fix(mol_comp_flow)
+        H2O_mass_frac = 1 - sum(x for x in feed_mass_frac.values())
+        H2O_mol_comp_flow = (
+                H2O_mass_frac
+                * pyunits.kg
+                / pyunits.kg
+                * mass_flow_in
+                / m.fs.unit.feed_side.properties_in[0].mw_comp["H2O"]
+        )
+        m.fs.unit.inlet.flow_mol_phase_comp[0, "Liq", "H2O"].fix(H2O_mol_comp_flow)
+
+        # Use assert electroneutrality method from property model to ensure the ion concentrations provided
+        # obey electroneutrality condition
+        m.fs.unit.feed_side.properties_in[0].assert_electroneutrality(
+            defined_state=True,
+            adjust_by_ion="Cl_-",
+            get_property="mass_frac_phase_comp",
+        )
+
+        # Fix other inlet state variables
+        m.fs.unit.inlet.temperature[0].fix(298.15)
+        m.fs.unit.inlet.pressure[0].fix(4e5)
+
+        # Fix the membrane variables that are usually fixed for the DSPM-DE model
+        m.fs.unit.radius_pore.fix(0.5e-9)
+        m.fs.unit.membrane_thickness_effective.fix(1.33e-6)
+        m.fs.unit.membrane_charge_density.fix(-27)
+        m.fs.unit.dielectric_constant_pore.fix(41.3)
+
+        # Fix final permeate pressure to be ~atmospheric
+        m.fs.unit.mixed_permeate[0].pressure.fix(101325)
+
+        m.fs.unit.spacer_porosity.fix(0.85)
+        m.fs.unit.channel_height.fix(5e-4)
+        m.fs.unit.velocity[0, 0].fix(0.25)
+        m.fs.unit.area.fix(50)
+        # Fix additional variables for calculating mass transfer coefficient with spiral wound correlation
+        m.fs.unit.spacer_mixing_efficiency.fix()
+        m.fs.unit.spacer_mixing_length.fix()
+
+        scaler = m.fs.unit.default_scaler()
+        assert isinstance(scaler, NanofiltrationDSPMDE0DScaler)
+
+        scaler.scale_model(m.fs.unit)
+
+        from idaes.core.scaling import report_scaling_factors
+
+        report_scaling_factors(m.fs.unit, descend_into=True)
+
+        from idaes.core.util import DiagnosticsToolbox
+        from pyomo.environ import TransformationFactory
+
+        sm = TransformationFactory("core.scale_model").create_using(m, rename=False)
+        dt2 = DiagnosticsToolbox(model=sm)
+
+        dt2.report_numerical_issues()
+
+        assert False

@@ -15,6 +15,7 @@ from enum import Enum, auto
 
 # Import Pyomo libraries
 from pyomo.environ import (
+    Constraint,
     Set,
     Var,
     Suffix,
@@ -41,17 +42,17 @@ from idaes.core import (
     useDefault,
     MaterialFlowBasis,
 )
-from watertap.core.solvers import get_solver
 from idaes.core.util.math import smooth_min
 from idaes.core.util.tables import create_stream_table_dataframe
 from idaes.core.util.config import is_physical_parameter_block
 from idaes.core.util.exceptions import ConfigurationError, InitializationError
 import idaes.core.util.scaling as iscale
 from idaes.core.util.constants import Constants
-from watertap.core.util.initialization import check_dof
-
+from idaes.core.scaling import CustomScalerBase, ConstraintScalingScheme
 import idaes.logger as idaeslog
 
+from watertap.core.util.initialization import check_dof
+from watertap.core.solvers import get_solver
 from watertap.core import InitializationMixin
 from watertap.costing.unit_models.nanofiltration import cost_nanofiltration
 
@@ -80,6 +81,483 @@ class ConcentrationPolarizationType(Enum):
     calculated = auto()
 
 
+class NanofiltrationDSPMDE0DScaler(CustomScalerBase):
+
+    def variable_scaling_routine(
+            self, model, overwrite: bool = False, submodel_scalers: dict = None
+    ):
+        # Call scaling methods for sub-models
+        self.call_submodel_scaler_method(
+            submodel=model.feed_side.properties_in,
+            method="variable_scaling_routine",
+            submodel_scalers=submodel_scalers,
+            overwrite=overwrite,
+        )
+
+        # Propagate scaling from inlet state
+        self.propagate_state_scaling(
+            target_state=model.feed_side.properties_out,
+            source_state=model.feed_side.properties_in,
+            overwrite=overwrite,
+        )
+
+        self.call_submodel_scaler_method(
+            submodel=model.feed_side.properties_out,
+            method="variable_scaling_routine",
+            submodel_scalers=submodel_scalers,
+            overwrite=overwrite,
+        )
+        self.call_submodel_scaler_method(
+            submodel=model.permeate_side,
+            method="variable_scaling_routine",
+            submodel_scalers=submodel_scalers,
+            overwrite=overwrite,
+        )
+        self.call_submodel_scaler_method(
+            submodel=model.mixed_permeate,
+            method="variable_scaling_routine",
+            submodel_scalers=submodel_scalers,
+            overwrite=overwrite,
+        )
+        self.call_submodel_scaler_method(
+            submodel=model.feed_side.properties_interface,
+            method="variable_scaling_routine",
+            submodel_scalers=submodel_scalers,
+            overwrite=overwrite,
+        )
+        self.call_submodel_scaler_method(
+            submodel=model.pore_entrance,
+            method="variable_scaling_routine",
+            submodel_scalers=submodel_scalers,
+            overwrite=overwrite,
+        )
+        self.call_submodel_scaler_method(
+            submodel=model.pore_exit,
+            method="variable_scaling_routine",
+            submodel_scalers=submodel_scalers,
+            overwrite=overwrite,
+        )
+
+    def constraint_scaling_routine(
+            self, model, overwrite: bool = False, submodel_scalers: dict = None
+    ):
+        # Call scaling methods for sub-models
+        self.call_submodel_scaler_method(
+            submodel=model.feed_side.properties_in,
+            method="constraint_scaling_routine",
+            submodel_scalers=submodel_scalers,
+            overwrite=overwrite,
+        )
+        self.call_submodel_scaler_method(
+            submodel=model.feed_side.properties_out,
+            method="constraint_scaling_routine",
+            submodel_scalers=submodel_scalers,
+            overwrite=overwrite,
+        )
+        self.call_submodel_scaler_method(
+            submodel=model.permeate_side,
+            method="constraint_scaling_routine",
+            submodel_scalers=submodel_scalers,
+            overwrite=overwrite,
+        )
+        self.call_submodel_scaler_method(
+            submodel=model.mixed_permeate,
+            method="constraint_scaling_routine",
+            submodel_scalers=submodel_scalers,
+            overwrite=overwrite,
+        )
+        self.call_submodel_scaler_method(
+            submodel=model.feed_side.properties_interface,
+            method="constraint_scaling_routine",
+            submodel_scalers=submodel_scalers,
+            overwrite=overwrite,
+        )
+        self.call_submodel_scaler_method(
+            submodel=model.pore_entrance,
+            method="constraint_scaling_routine",
+            submodel_scalers=submodel_scalers,
+            overwrite=overwrite,
+        )
+        self.call_submodel_scaler_method(
+            submodel=model.pore_exit,
+            method="constraint_scaling_routine",
+            submodel_scalers=submodel_scalers,
+            overwrite=overwrite,
+        )
+
+        for c in model.component_data_objects(Constraint, descend_into=False):
+            self.scale_constraint_by_nominal_value(
+                c,
+                scheme=ConstraintScalingScheme.inverseMaximum,
+                overwrite=overwrite,
+            )
+
+        for c in model.feed_side.component_data_objects(Constraint, descend_into=False):
+            self.scale_constraint_by_nominal_value(
+                c,
+                scheme=ConstraintScalingScheme.inverseMaximum,
+                overwrite=overwrite,
+            )
+
+    # def calculate_scaling_factors(self):
+    #     super().calculate_scaling_factors()
+    #
+    #     # setting scaling factors for variables
+    #     for v in self.recovery_vol_phase.values():
+    #         iscale.set_scaling_factor(v, 1)
+    #     if iscale.get_scaling_factor(self.radius_pore) is None:
+    #         iscale.set_scaling_factor(self.radius_pore, 1 / value(self.radius_pore))
+    #     if iscale.get_scaling_factor(self.membrane_thickness_effective) is None:
+    #         iscale.set_scaling_factor(
+    #             self.membrane_thickness_effective,
+    #             1 / value(self.membrane_thickness_effective),
+    #         )
+    #
+    #     if iscale.get_scaling_factor(self.membrane_charge_density) is None:
+    #         iscale.set_scaling_factor(
+    #             self.membrane_charge_density,
+    #             1 / abs(value(self.membrane_charge_density[0])),
+    #         )
+    #     if iscale.get_scaling_factor(self.dielectric_constant_pore) is None:
+    #         iscale.set_scaling_factor(
+    #             self.dielectric_constant_pore,
+    #             1 / value(self.dielectric_constant_pore[0]),
+    #         )
+    #     if hasattr(self, "spacer_mixing_efficiency"):
+    #         if iscale.get_scaling_factor(self.spacer_mixing_efficiency) is None:
+    #             iscale.set_scaling_factor(
+    #                 self.spacer_mixing_efficiency,
+    #                 1 / value(self.spacer_mixing_efficiency),
+    #             )
+    #     if hasattr(self, "spacer_porosity"):
+    #         if iscale.get_scaling_factor(self.spacer_porosity) is None:
+    #             iscale.set_scaling_factor(
+    #                 self.spacer_porosity, value(1 / self.spacer_porosity)
+    #             )
+    #     # setting scaling factors for variables
+    #     # these variables should have user input, if not there will be a warning
+    #     if iscale.get_scaling_factor(self.area) is None:
+    #         sf = iscale.get_scaling_factor(self.area, default=1, warning=True)
+    #         iscale.set_scaling_factor(self.area, sf)
+    #
+    #     for v in self.electric_potential.values():
+    #         if iscale.get_scaling_factor(v) is None:
+    #             iscale.set_scaling_factor(v, 1e2)
+    #     if hasattr(self, "electric_potential_grad_feed_interface"):
+    #         for v in self.electric_potential_grad_feed_interface.values():
+    #             if iscale.get_scaling_factor(v) is None:
+    #                 iscale.set_scaling_factor(v, 1)
+    #
+    #     # these variables do not typically require user input,
+    #     # will not override if the user does provide the scaling factor
+    #     # make sure we scale solvent first!
+    #     for (t, x, p, j), v in self.flux_mol_phase_comp.items():
+    #         if iscale.get_scaling_factor(v) is None:
+    #             comp = self.config.property_package.get_component(j)
+    #             if comp.is_solvent():
+    #                 if x == 0:
+    #                     prop_feed = self.feed_side.properties_in[t]
+    #                 elif x == 1:
+    #                     prop_feed = self.feed_side.properties_out[t]
+    #
+    #                 sf = (
+    #                     iscale.get_scaling_factor(prop_feed.dens_mass_phase["Liq"])
+    #                     / iscale.get_scaling_factor(prop_feed.mw_comp[j])
+    #                     * iscale.get_scaling_factor(prop_feed.pressure)
+    #                     * iscale.get_scaling_factor(self.radius_pore) ** 2
+    #                     / iscale.get_scaling_factor(prop_feed.visc_d_phase["Liq"])
+    #                     / iscale.get_scaling_factor(self.membrane_thickness_effective)
+    #                 )
+    #                 iscale.set_scaling_factor(v, sf)
+    #
+    #     for (t, x, p, j), v in self.flux_mol_phase_comp.items():
+    #         if iscale.get_scaling_factor(v) is None:
+    #             if comp.is_solute():
+    #                 # simply based on feed flow mol scaling
+    #                 #
+    #                 sf = iscale.get_scaling_factor(
+    #                     self.feed_side.properties_in[t].flow_mol_phase_comp["Liq", j]
+    #                 )
+    #                 iscale.set_scaling_factor(v, sf)
+    #
+    #     for (t, p, j), v in self.flux_mol_phase_comp_avg.items():
+    #         if iscale.get_scaling_factor(v) is None:
+    #             sf = iscale.get_scaling_factor(self.flux_mol_phase_comp[t, 0, p, j])
+    #
+    #             iscale.set_scaling_factor(v, sf)
+    #
+    #     for v in self.rejection_intrinsic_phase_comp.values():
+    #         if iscale.get_scaling_factor(v) is None:
+    #             iscale.set_scaling_factor(v, 1)
+    #
+    #     for j in self.config.property_package.component_list:
+    #         sf = iscale.get_scaling_factor(
+    #             self.flux_mol_phase_comp_avg[t, p, j]
+    #         ) * iscale.get_scaling_factor(self.area)
+    #
+    #         iscale.set_scaling_factor(
+    #             self.feed_side.mass_transfer_term[0, "Liq", j], sf
+    #         )
+    #
+    #     if hasattr(self, "Kf_comp"):
+    #         for v in self.Kf_comp.values():
+    #             if iscale.get_scaling_factor(v) is None:
+    #                 iscale.set_scaling_factor(v, 1e6)
+    #
+    #     if hasattr(self, "N_Pe_comp"):
+    #         for v in self.N_Pe_comp.values():
+    #             if iscale.get_scaling_factor(v) is None:
+    #                 iscale.set_scaling_factor(v, 1e-4)
+    #     if hasattr(self, "N_Sc_comp"):
+    #         for v in self.N_Sc_comp.values():
+    #             if iscale.get_scaling_factor(v) is None:
+    #                 iscale.set_scaling_factor(v, 1e-3)
+    #
+    #     for v in self.velocity.values():
+    #         if iscale.get_scaling_factor(v) is None:
+    #             iscale.set_scaling_factor(v, 1e1)
+    #
+    #     if iscale.get_scaling_factor(self.channel_height) is None:
+    #         iscale.set_scaling_factor(self.channel_height, 1e3)
+    #
+    #     if hasattr(self, "length"):
+    #         if iscale.get_scaling_factor(self.length) is None:
+    #             iscale.set_scaling_factor(self.length, 1)
+    #
+    #     if hasattr(self, "width"):
+    #         if iscale.get_scaling_factor(self.width) is None:
+    #             iscale.set_scaling_factor(self.width, 1)
+    #
+    #     # transforming constraints
+    #     for (t, x, p), con in self.eq_water_flux.items():
+    #         sf = (
+    #             iscale.get_scaling_factor(self.flux_mol_phase_comp[t, x, p, "H2O"])
+    #             * iscale.get_scaling_factor(
+    #                 self.feed_side.properties_in[t].mw_comp["H2O"]
+    #             )
+    #             / iscale.get_scaling_factor(
+    #                 self.feed_side.properties_in[t].dens_mass_solvent
+    #             )
+    #         )
+    #         iscale.constraint_scaling_transform(con, sf)
+    #
+    #     for (t, x, p, j), con in self.eq_solute_solvent_flux.items():
+    #         sf = iscale.get_scaling_factor(self.flux_mol_phase_comp[t, x, p, j])
+    #         iscale.constraint_scaling_transform(con, sf)
+    #
+    #     for (t, x, p, j), con in self.eq_interfacial_partitioning_feed.items():
+    #         fsc = value(self.partition_factor_steric_comp[t, j])
+    #         bs = value(self.partition_factor_born_solvation_comp[t, j])
+    #         fdc = value(self.partition_factor_donnan_comp_feed[t, x, j])
+    #         hindrance_factor = fsc * bs * fdc
+    #         # we expect that there will be less ions at the membrane with same charge
+    #         # e.g., negative ions are repulsed by negative membranes, but positive ions are attracted
+    #         membrane_charge = value(self.membrane_charge_density[0])
+    #         if membrane_charge * value(self.permeate_side[t, x].charge_comp[j]) > 0:
+    #             charge_reflection_multiplier = 10 ** -abs(
+    #                 value(self.permeate_side[t, x].charge_comp[j])
+    #             )
+    #         else:
+    #             charge_reflection_multiplier = 10 ** abs(
+    #                 value(self.permeate_side[t, x].charge_comp[j])
+    #             )
+    #         iscale.constraint_scaling_transform(
+    #             con, 1 / (hindrance_factor * charge_reflection_multiplier)
+    #         )
+    #
+    #     for (t, x, p, j), con in self.eq_interfacial_partitioning_permeate.items():
+    #         fsc = value(self.partition_factor_steric_comp[t, j])
+    #         bs = value(self.partition_factor_born_solvation_comp[t, j])
+    #         fdp = value(self.partition_factor_donnan_comp_permeate[t, x, j])
+    #         hindrance_factor = fsc * bs * fdp
+    #         # we expect that there will be less ions at membrane with same charge as itself
+    #         # e.g., negative ions are repulsed by negative membranes, but positive ions are attracted
+    #         membrane_charge = value(self.membrane_charge_density[0])
+    #         if membrane_charge * value(self.permeate_side[t, x].charge_comp[j]) > 0:
+    #             charge_reflection_multiplier = 10 ** -abs(
+    #                 value(self.permeate_side[t, x].charge_comp[j])
+    #             )
+    #         else:
+    #             charge_reflection_multiplier = 10 ** abs(
+    #                 value(self.permeate_side[t, x].charge_comp[j])
+    #             )
+    #         iscale.constraint_scaling_transform(
+    #             con, 1 / (hindrance_factor * charge_reflection_multiplier)
+    #         )
+    #
+    #     for (t, p, j), con in self.eq_mass_transfer_feed.items():
+    #         sf = iscale.get_scaling_factor(
+    #             self.flux_mol_phase_comp_avg[t, p, j]
+    #         ) * iscale.get_scaling_factor(self.area)
+    #
+    #         iscale.constraint_scaling_transform(con, sf)
+    #
+    #     for (t, p, j), con in self.eq_permeate_production.items():
+    #         sf = iscale.get_scaling_factor(
+    #             self.flux_mol_phase_comp_avg[t, p, j]
+    #         ) * iscale.get_scaling_factor(self.area)
+    #
+    #         iscale.constraint_scaling_transform(con, sf)
+    #
+    #     for (t, p, j), con in self.eq_permeate_production.items():
+    #         sf = iscale.get_scaling_factor(
+    #             self.flux_mol_phase_comp_avg[t, p, j]
+    #         ) * iscale.get_scaling_factor(self.area)
+    #
+    #         iscale.constraint_scaling_transform(con, sf)
+    #
+    #     for (t, p, j), con in self.eq_rejection_intrinsic_phase_comp.items():
+    #         sf = iscale.get_scaling_factor(self.rejection_intrinsic_phase_comp[t, p, j])
+    #         iscale.constraint_scaling_transform(con, sf)
+    #
+    #     for (t, x), con in self.eq_velocity.items():
+    #         sf = iscale.get_scaling_factor(
+    #             self.feed_side.properties_in[0].flow_vol_phase["Liq"]
+    #         )
+    #         iscale.constraint_scaling_transform(con, sf)
+    #
+    #     for (t, x), con in self.feed_side.eq_equal_flow_vol_feed_interface.items():
+    #         sf = iscale.get_scaling_factor(
+    #             self.feed_side.properties_in[0].flow_vol_phase["Liq"]
+    #         )
+    #         iscale.constraint_scaling_transform(con, sf)
+    #
+    #     for (t, x), con in self.eq_equal_flow_vol_pore.items():
+    #         sf = (
+    #             iscale.get_scaling_factor(self.flux_mol_phase_comp[t, x, "Liq", "H2O"])
+    #             / iscale.get_scaling_factor(
+    #                 self.feed_side.properties_in[t].dens_mass_phase["Liq"]
+    #             )
+    #             * iscale.get_scaling_factor(
+    #                 self.feed_side.properties_in[t].mw_comp["H2O"]
+    #             )
+    #         )
+    #         iscale.constraint_scaling_transform(con, sf)
+    #
+    #     for (t, x), con in self.eq_equal_flow_vol_pore_exit_perm.items():
+    #         sf = (
+    #             iscale.get_scaling_factor(self.flux_mol_phase_comp[t, x, "Liq", "H2O"])
+    #             / iscale.get_scaling_factor(
+    #                 self.feed_side.properties_in[t].dens_mass_phase["Liq"]
+    #             )
+    #             * iscale.get_scaling_factor(
+    #                 self.feed_side.properties_in[t].mw_comp["H2O"]
+    #             )
+    #         )
+    #         iscale.constraint_scaling_transform(con, sf)
+    #
+    #     for (t, x), con in self.eq_equal_flow_vol_permeate.items():
+    #         sf = (
+    #             iscale.get_scaling_factor(self.flux_mol_phase_comp[t, x, "Liq", "H2O"])
+    #             / iscale.get_scaling_factor(
+    #                 self.feed_side.properties_in[t].dens_mass_phase["Liq"]
+    #             )
+    #             * iscale.get_scaling_factor(
+    #                 self.feed_side.properties_in[t].mw_comp["H2O"]
+    #             )
+    #         )
+    #         iscale.constraint_scaling_transform(con, sf)
+    #
+    #     for (t, x, p, j), con in self.eq_solute_flux_concentration_polarization.items():
+    #         sf = iscale.get_scaling_factor(self.flux_mol_phase_comp[t, x, p, j])
+    #         iscale.constraint_scaling_transform(con, sf)
+    #
+    #     for (t, x, p, j), con in self.eq_solute_flux_pore_domain.items():
+    #         sf = iscale.get_scaling_factor(self.flux_mol_phase_comp[t, x, p, j])
+    #         iscale.constraint_scaling_transform(con, sf)
+    #
+    #     for (t, x, y, p), con in self.eq_electroneutrality_pore.items():
+    #         sf = (
+    #             sum(
+    #                 (
+    #                     iscale.get_scaling_factor(
+    #                         self.pore_entrance[t, x].conc_mol_phase_comp[p, j]
+    #                     )
+    #                     * iscale.get_scaling_factor(
+    #                         self.pore_entrance[t, x].charge_comp[j]
+    #                     )
+    #                 )
+    #                 ** -1
+    #                 for j in self.config.property_package.solute_set
+    #             )
+    #             ** -1
+    #         ) ** -1
+    #
+    #         sf += iscale.get_scaling_factor(self.membrane_charge_density[0]) ** -1
+    #         iscale.constraint_scaling_transform(con, sf**-1)
+    #
+    #     for (t, x, p), con in self.eq_electroneutrality_permeate.items():
+    #         sf = (
+    #             sum(
+    #                 (
+    #                     iscale.get_scaling_factor(
+    #                         self.permeate_side[t, x].conc_mol_phase_comp[p, j]
+    #                     )
+    #                     * iscale.get_scaling_factor(
+    #                         self.permeate_side[t, x].charge_comp[j]
+    #                     )
+    #                 )
+    #                 ** -1
+    #                 for j in self.config.property_package.solute_set
+    #             )
+    #             ** -1
+    #         )
+    #         iscale.constraint_scaling_transform(con, sf)
+    #
+    #     if hasattr(self, "eq_electroneutrality_interface"):
+    #         for (t, x, p), con in self.eq_electroneutrality_interface.items():
+    #             sf = (
+    #                 sum(
+    #                     (
+    #                         iscale.get_scaling_factor(
+    #                             self.feed_side.properties_interface[
+    #                                 t, x
+    #                             ].conc_mol_phase_comp[p, j]
+    #                         )
+    #                         * iscale.get_scaling_factor(
+    #                             self.feed_side.properties_interface[t, x].charge_comp[j]
+    #                         )
+    #                     )
+    #                     ** -1
+    #                     for j in self.config.property_package.solute_set
+    #                 )
+    #                 ** -1
+    #             )
+    #             iscale.constraint_scaling_transform(con, sf)
+    #
+    #     if hasattr(self, "eq_N_Pe_comp"):
+    #         for ind, con in self.eq_N_Pe_comp.items():
+    #             sf = iscale.get_scaling_factor(self.N_Pe_comp[ind])
+    #             iscale.constraint_scaling_transform(con, sf)
+    #
+    #     if hasattr(self, "eq_Kf_comp"):
+    #         for ind, con in self.eq_Kf_comp.items():
+    #             sf = iscale.get_scaling_factor(self.Kf_comp[ind])
+    #             iscale.constraint_scaling_transform(con, sf)
+    #     if hasattr(self, "eq_Kf_comp"):
+    #         for (t, p, j), con in self.eq_N_Sc_comp.items():
+    #             sf = iscale.get_scaling_factor(
+    #                 self.feed_side.properties_in[0].visc_d_phase["Liq"]
+    #             )
+    #             iscale.constraint_scaling_transform(con, sf)
+    #     for con in self.eq_pressure_permeate_io.values():
+    #         iscale.constraint_scaling_transform(con, 1e-4)
+    #
+    #     for con in self.eq_recovery_vol_phase.values():
+    #         iscale.constraint_scaling_transform(con, 1)
+    #     # isothermal transforms
+    #     for con in self.eq_permeate_isothermal.values():
+    #         iscale.constraint_scaling_transform(con, 1e-2)
+    #     for con in self.eq_pore_isothermal.values():
+    #         iscale.constraint_scaling_transform(con, 1e-2)
+    #     for con in self.eq_permeate_isothermal_mixed.values():
+    #         iscale.constraint_scaling_transform(con, 1e-2)
+    #     for con in self.feed_side.eq_feed_interface_isothermal.values():
+    #         iscale.constraint_scaling_transform(con, 1e-2)
+    #     for con in self.feed_side.eq_feed_isothermal.values():
+    #         iscale.constraint_scaling_transform(con, 1e-2)
+
+
 @declare_process_block_class("NanofiltrationDSPMDE0D")
 class NanofiltrationData(InitializationMixin, UnitModelBlockData):
     """
@@ -93,6 +571,8 @@ class NanofiltrationData(InitializationMixin, UnitModelBlockData):
         Roy et al., 2015 (http://dx.doi.org/10.1016/j.memsci.2015.06.030)
         Labban et al., 2017 (http://dx.doi.org/10.1016/j.memsci.2016.08.062)
     """
+
+    default_scaler=NanofiltrationDSPMDE0DScaler
 
     CONFIG = ConfigBlock()
 
@@ -335,13 +815,13 @@ class NanofiltrationData(InitializationMixin, UnitModelBlockData):
         tmp_dict["defined_state"] = False  # these blocks are not inlets
 
         # Add permeate block
-        self.permeate_side = self.config.property_package.state_block_class(
+        self.permeate_side = self.config.property_package.build_state_block(
             self.flowsheet().config.time,
             io_list,
             doc="Material properties of permeate along permeate channel",
             **tmp_dict,
         )
-        self.mixed_permeate = self.config.property_package.state_block_class(
+        self.mixed_permeate = self.config.property_package.build_state_block(
             self.flowsheet().config.time,
             doc="Material properties of mixed permeate exiting the module",
             **tmp_dict,
@@ -354,7 +834,7 @@ class NanofiltrationData(InitializationMixin, UnitModelBlockData):
 
         # Membrane interface: indexed state block
         self.feed_side.properties_interface = (
-            self.config.property_package.state_block_class(
+            self.config.property_package.build_state_block(
                 self.flowsheet().config.time,
                 io_list,
                 doc="Material properties of feed-side membrane interface",
@@ -362,14 +842,14 @@ class NanofiltrationData(InitializationMixin, UnitModelBlockData):
             )
         )
         # Pore entrance: indexed state block
-        self.pore_entrance = self.config.property_package.state_block_class(
+        self.pore_entrance = self.config.property_package.build_state_block(
             self.flowsheet().config.time,
             io_list,
             doc="Fluid properties within the membrane pore entrance",
             **tmp_dict,
         )
         # Pore exit: indexed state block
-        self.pore_exit = self.config.property_package.state_block_class(
+        self.pore_exit = self.config.property_package.build_state_block(
             self.flowsheet().config.time,
             io_list,
             doc="Fluid properties within the membrane pore exit",
