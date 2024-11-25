@@ -50,6 +50,7 @@ from idaes.core.util.initialization import propagate_state
 from idaes.models.unit_models import (
     Feed,
 )
+from idaes.core.scaling import set_scaling_factor
 
 from watertap.property_models.multicomp_aq_sol_prop_pack import (
     MCASParameterBlock,
@@ -2049,6 +2050,14 @@ class TestNFScaler:
         # Fix additional variables for calculating mass transfer coefficient with spiral wound correlation
         m.fs.unit.spacer_mixing_efficiency.fix()
         m.fs.unit.spacer_mixing_length.fix()
+
+        # Set scaling for inlet stream
+        set_scaling_factor(m.fs.unit.inlet.flow_mol_phase_comp[0, "Liq", "H2O"], 1e-1)
+        set_scaling_factor(m.fs.unit.inlet.flow_mol_phase_comp[0, "Liq", "Ca_2+"], 1e2)
+        set_scaling_factor(m.fs.unit.inlet.flow_mol_phase_comp[0, "Liq", "SO4_2-"], 1e2)
+        set_scaling_factor(m.fs.unit.inlet.flow_mol_phase_comp[0, "Liq", "Mg_2+"], 1e2)
+        set_scaling_factor(m.fs.unit.inlet.flow_mol_phase_comp[0, "Liq", "Na_+"], 1e1)
+        set_scaling_factor(m.fs.unit.inlet.flow_mol_phase_comp[0, "Liq", "Cl_-"], 1e1)
 
         scaler = m.fs.unit.default_scaler()
         assert isinstance(scaler, NanofiltrationDSPMDE0DScaler)
