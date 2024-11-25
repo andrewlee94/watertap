@@ -15,6 +15,7 @@ from enum import Enum, auto
 
 # Import Pyomo libraries
 from pyomo.environ import (
+    Block,
     Constraint,
     Set,
     Var,
@@ -48,8 +49,10 @@ from idaes.core.util.config import is_physical_parameter_block
 from idaes.core.util.exceptions import ConfigurationError, InitializationError
 import idaes.core.util.scaling as iscale
 from idaes.core.util.constants import Constants
-from idaes.core.scaling import CustomScalerBase, ConstraintScalingScheme
+from idaes.core.scaling import CustomScalerBase, ConstraintScalingScheme, set_scaling_factor
 import idaes.logger as idaeslog
+from idaes.core.initialization import SingleControlVolumeUnitInitializer
+from idaes.core.util import to_json, from_json, StoreSpec
 
 from watertap.core.util.initialization import check_dof
 from watertap.core.solvers import get_solver
@@ -81,6 +84,391 @@ class ConcentrationPolarizationType(Enum):
     calculated = auto()
 
 
+class NanofiltrationDSPMDE0DInitializer(SingleControlVolumeUnitInitializer):
+    """
+    Initializer for 0D DSPMDE Nanofiltration units.
+
+    """
+    CONFIG = SingleControlVolumeUnitInitializer.CONFIG()
+    CONFIG.always_estimate_states = True
+
+    def initialization_routine(
+        self,
+        model: Block,
+        plugin_initializer_args: dict = None,
+        copy_inlet_state: bool = False,
+        deltaP = 0 * pyunits.Pa,
+        solvent_recovery = 0.1,
+        solute_recovery = 0.1,
+        cp_modulus = 1,
+    ):
+        """
+        Common initialization routine for DSPMDE Nanofiltration model.
+
+        Args:
+            model: Pyomo Block to be initialized
+            plugin_initializer_args: dict-of-dicts containing arguments to be passed to plug-in Initializers.
+                Keys should be submodel components.
+            copy_inlet_state: bool (default=False). Whether to copy inlet state to other states or not
+                (0-D control volumes only). Copying will generally be faster, but inlet states may not contain
+                all properties required elsewhere.
+            deltaP: initial guess for pressure drop to assist with initialization. Can be a Pyomo expression with units.
+            solvent_recovery: initial guess of solvent recovery to assist with initialization.
+            solute_recovery: initial guess of solute recovery to assist with initialization.
+            cp_modulus: initial guess of cp modulus to assist with initialization.
+
+        Returns:
+            Pyomo solver results object
+        """
+        return super(SingleControlVolumeUnitInitializer, self).initialization_routine(
+            model=model,
+            plugin_initializer_args=plugin_initializer_args,
+            copy_inlet_state=copy_inlet_state,
+            deltaP=deltaP,
+            solvent_recovery=solvent_recovery,
+            solute_recovery=solute_recovery,
+            cp_modulus=cp_modulus,
+        )
+
+    def initialize_main_model(
+        self,
+        model: Block,
+        copy_inlet_state: bool = False,
+        deltaP = 0 * pyunits.Pa,
+        solvent_recovery = 0.1,
+        solute_recovery = 0.1,
+        cp_modulus = 1,
+    ):
+        """
+        Initialization routine for main NanofiltrationDSPMDE0D models.
+
+        Args:
+            model: Pyomo Block to be initialized.
+            copy_inlet_state: bool (default=False). Whether to copy inlet state to other states or not
+                (0-D control volumes only). Copying will generally be faster, but inlet states may not contain
+                all properties required elsewhere.
+            deltaP: initial guess for pressure drop to assist with initialization. Can be a Pyomo expression with units.
+            solvent_recovery: initial guess of solvent recovery to assist with initialization.
+            solute_recovery: initial guess of solute recovery to assist with initialization.
+            cp_modulus: initial guess of cp modulus to assist with initialization.
+
+        Returns:
+            Pyomo solver results object.
+
+        """
+        # Get loggers
+        init_log = idaeslog.getInitLogger(
+            model.name, self.get_output_level(), tag="unit"
+        )
+        solve_log = idaeslog.getSolveLogger(
+            model.name, self.get_output_level(), tag="unit"
+        )
+
+        # Create solver
+        solver = self._get_solver()
+
+        # ---------------------------------------------------------------------
+        # Initialize inlet state
+        prop_init = self.get_submodel_initializer(model.feed_side.properties_in)
+
+        if prop_init is not None:
+            prop_init.initialize(
+                model=model.feed_side.properties_in,
+                output_level=self.get_output_level(),
+            )
+        else:
+            raise ValueError(
+                "No Initializer found for property package. Please set provide "
+                "sub-model initializers or assign a default Initializer."
+            )
+
+        init_log.info_high("Initialization Step 1 (inlet state) Complete.")
+
+        # ---------------------------------------------------------------------
+        # Initialize other state blocks based on properties at inlet state block
+        # First estimate values for state variables based on inlet and initial guesses
+        if not copy_inlet_state:
+            self._set_state_args(model, deltaP, solute_recovery, solvent_recovery, cp_modulus)
+        else:
+            self._copy_state(model)
+
+        # Then, call Initializer for all remaining states
+        prop_init.initialize(
+            model=model.feed_side.properties_out,
+            output_level=self.get_output_level(),
+        )
+        prop_init.initialize(
+            model=model.feed_side.properties_interface,
+            output_level=self.get_output_level(),
+        )
+        prop_init.initialize(
+            model=model.permeate_side,
+            output_level=self.get_output_level(),
+        )
+        prop_init.initialize(
+            model=model.mixed_permeate,
+            output_level=self.get_output_level(),
+        )
+        prop_init.initialize(
+            model=model.pore_entrance,
+            output_level=self.get_output_level(),
+        )
+        prop_init.initialize(
+            model=model.pore_exit,
+            output_level=self.get_output_level(),
+        )
+
+        init_log.info_high("Initialization Step 2 Complete.")
+
+        # ---------------------------------------------------------------------
+        # Provide better guesses for unit model variables
+        for (t, x), v in model.velocity.items():
+            if not v.fixed:
+                if x == 0:
+                    prop_io = model.feed_side.properties_in[t]
+                else:
+                    prop_io = model.feed_side.properties_out[t]
+                v.set_value(prop_io.flow_vol_phase["Liq"]/model.area_cross)
+
+        # Spiral wound membrane properties
+        if (
+                model.config.mass_transfer_coefficient
+                == MassTransferCoefficient.spiral_wound
+        ):
+            for (t, x, j), v in model.N_Pe_comp.items():
+                if not v.fixed:
+                   v.set_value(
+                        2
+                        * model.channel_height
+                        * model.velocity[t, x]
+                        / model.config.property_package.diffus_phase_comp["Liq", j]
+                    )
+
+            for (t, x, j), v in model.N_Sc_comp.items():
+                if not v.fixed:
+                    if x == 0:
+                        prop_io = model.feed_side.properties_in[t]
+                    else:
+                        prop_io = model.feed_side.properties_out[t]
+                    v.set_value(
+                        prop_io.visc_d_phase["Liq"]
+                        / prop_io.dens_mass_phase["Liq"]
+                        / prop_io.diffus_phase_comp["Liq", j]
+                    )
+
+            for (t, x, j), v in model.Kf_comp.items():
+                if not v.fixed:
+                    v.set_value(
+                        0.753
+                        * (
+                                model.spacer_mixing_efficiency
+                                / (2 - model.spacer_mixing_efficiency)
+                        )
+                        ** 0.5
+                        * (
+                                2
+                                * model.config.property_package.diffus_phase_comp[
+                                    "Liq", j
+                                ]
+                                / model.channel_height
+                        )
+                        * model.N_Sc_comp[t, x, j] ** (-1 / 6)
+                        * (
+                                model.N_Pe_comp[t, x, j]
+                                * model.channel_height
+                                / (2 * model.spacer_mixing_length)
+                        )
+                        ** 0.5
+                    )
+
+        for (t, p ,j), v in model.feed_side.mass_transfer_term.items():
+            # TODO: This seems to presume the use of molar flow basis
+            if not v.fixed:
+                v.set_value(
+                    model.feed_side.properties_out[t].flow_mol_phase_comp[p, j]
+                    - model.feed_side.properties_in[t].flow_mol_phase_comp[p, j]
+                )
+
+        for (t, x, p, j), v in model.flux_mol_phase_comp.items():
+            if not v.fixed:
+                v.set_value(
+                    -model.feed_side.mass_transfer_term[t, p, j] / model.area
+                )
+
+        # ---------------------------------------------------------------------
+        # Solve unit
+
+        from idaes.core.scaling import report_scaling_factors
+
+        report_scaling_factors(model, descend_into=True)
+
+        from idaes.core.util import DiagnosticsToolbox
+        from pyomo.environ import TransformationFactory
+
+        sm = TransformationFactory("core.scale_model").create_using(model, rename=False)
+        dt2 = DiagnosticsToolbox(model=sm)
+
+        dt2.report_numerical_issues()
+
+        with idaeslog.solver_log(solve_log, idaeslog.DEBUG) as slc:
+            res = solver.solve(model, tee=slc.tee)
+
+        count = 1
+        while not check_optimal_termination(res) and count < 3:
+            init_log.info("Attempting to resolve")
+
+            for v, val in iscale.badly_scaled_var_generator(model):
+                print(v.name, val)
+                set_scaling_factor(v, abs(value(1/v)))
+
+            res = solver.solve(model, tee=slc.tee)
+
+            dt2.report_numerical_issues()
+
+            count += 1
+
+        init_log.info("Initialization Completed, {}".format(idaeslog.condition(res)))
+
+        return res
+
+    def _set_state_var(self, block, var_name, val):
+        """
+        Set initial guess for block.var_name using value, with check for not overwriting existing values
+
+        """
+        var = block.find_component(var_name)
+        if var.fixed:
+            # Do not touch fixed Vars
+            pass
+        elif var.value is not None and not self.config.always_estimate_states:
+            # Var has a value and we are not always estimating - do nothing
+            pass
+        else:
+            var.set_value(val)
+
+    def _set_state_args(
+        self, model, deltaP, solute_recovery, solvent_recovery, cp_modulus
+    ):
+        for t in model.flowsheet().time:
+            state_dict = model.feed_side.properties_in[t].define_port_members()
+
+            # Pressure
+            for sv in state_dict.values():
+                if sv.local_name == "pressure":
+                    # Retentate side
+                    self._set_state_var(model.feed_side.properties_out[t], sv.local_name, sv+deltaP)
+
+                    for x in model.io_list:
+                        self._set_state_var(model.feed_side.properties_interface[t, x], sv.local_name, sv + deltaP)
+                        self._set_state_var(model.pore_entrance[t, x], sv.local_name, sv + deltaP)
+
+                    # Permeate side
+                    self._set_state_var(model.mixed_permeate[t], sv.local_name, sv)
+
+                    for x in model.io_list:
+                        # USe mixed permeate pressure, as this will often be fixed by user
+                        self._set_state_var(model.permeate_side[t, x], sv.local_name, model.mixed_permeate[t].pressure)
+                        self._set_state_var(model.pore_exit[t, x], sv.local_name, model.mixed_permeate[t].pressure)
+
+                elif "flow" in sv.local_name:
+                    if sv.local_name.endswith("comp"):
+                        for idx, svd in sv.items():
+                            # Component is last element of index
+                            j = idx[-1]
+                            if j in model.feed_side.properties_in[t].params.solvent_set:
+                                ret = (1-solvent_recovery)
+                                inter = (1-solvent_recovery)
+                                perm = solvent_recovery
+                            else:
+                                ret = (1 - solute_recovery)
+                                inter = cp_modulus
+                                perm = solute_recovery
+
+                            # Retentate side
+                            self._set_state_var(model.feed_side.properties_out[t], svd.local_name, svd*ret)
+
+                            for x in model.io_list:
+                                self._set_state_var(model.feed_side.properties_interface[t, x], svd.local_name,
+                                                    svd*inter)
+                                self._set_state_var(model.pore_entrance[t, x], svd.local_name, svd*inter)
+
+                            # Permeate side
+                            self._set_state_var(model.mixed_permeate[t], svd.local_name, svd*perm)
+
+                            for x in model.io_list:
+                                self._set_state_var(model.permeate_side[t, x], svd.local_name, svd*perm)
+                                self._set_state_var(model.pore_exit[t, x], svd.local_name, svd*perm)
+
+                    else:
+                        # Retentate side
+                        self._set_state_var(model.feed_side.properties_out[t], svd.local_name, svd * (1-solvent_recovery))
+
+                        for x in model.io_list:
+                            self._set_state_var(model.feed_side.properties_interface[t, x], svd.local_name,
+                                                svd * (1-solvent_recovery))
+                            self._set_state_var(model.pore_entrance[t, x], svd.local_name, svd * (1-solvent_recovery))
+
+                        # Permeate side
+                        self._set_state_var(model.mixed_permeate[t], svd.local_name, svd * solvent_recovery)
+
+                        for x in model.io_list:
+                            self._set_state_var(model.permeate_side[t, x], svd.local_name, svd * solvent_recovery)
+                            self._set_state_var(model.pore_exit[t, x], svd.local_name, svd * solvent_recovery)
+
+                else:
+                    # Unknown, just propagate value
+                    self._set_state_var(model.feed_side.properties_out[t], sv.local_name, sv)
+                    self._set_state_var(model.mixed_permeate[t], sv.local_name, sv)
+
+                    for x in model.io_list:
+                        self._set_state_var(model.feed_side.properties_interface[t, x], sv.local_name, sv)
+                        self._set_state_var(model.permeate_side[t, x], sv.local_name, sv)
+                        self._set_state_var(model.pore_entrance[t, x], sv.local_name, sv)
+                        self._set_state_var(model.pore_exit[t, x], sv.local_name, sv)
+
+    def _copy_state(self, model):
+        # Map solution from inlet properties to other states
+        for t in model.flowsheet().time:
+            in_state = to_json(
+                model.feed_side.properties_in[t],
+                wts=StoreSpec().value(),
+                return_dict=True,
+            )
+
+            from_json(
+                model.feed_side.properties_out[t],
+                sd=in_state,
+                wts=StoreSpec().value(only_not_fixed=True),
+            )
+            from_json(
+                model.mixed_permeate[t],
+                sd=in_state,
+                wts=StoreSpec().value(only_not_fixed=True),
+            )
+
+            for x in model.io_list:
+                from_json(
+                    model.permeate_side[t, x],
+                    sd=in_state,
+                    wts=StoreSpec().value(only_not_fixed=True),
+                )
+                from_json(
+                    model.feed_side.properties_interface[t, x],
+                    sd=in_state,
+                    wts=StoreSpec().value(only_not_fixed=True),
+                )
+                from_json(
+                    model.pore_entrance[t, x],
+                    sd=in_state,
+                    wts=StoreSpec().value(only_not_fixed=True),
+                )
+                from_json(
+                    model.pore_exit[t, x],
+                    sd=in_state,
+                    wts=StoreSpec().value(only_not_fixed=True),
+                )
+
+
 class NanofiltrationDSPMDE0DScaler(CustomScalerBase):
     DEFAULT_SCALING_FACTORS = {
         "area": 1,
@@ -96,6 +484,7 @@ class NanofiltrationDSPMDE0DScaler(CustomScalerBase):
         "spacer_mixing_length": 10,
         "velocity": 10,
         "width": 1,
+        "feed_side.mass_transfer_term": 1e4,
     }
 
     def variable_scaling_routine(
@@ -229,18 +618,11 @@ class NanofiltrationDSPMDE0DScaler(CustomScalerBase):
                 self.set_variable_scaling_factor(v, sf, overwrite=overwrite)
 
             else:
-                # Scale based on feed flow mol scaling
-                self.scale_variable_by_component(
-                    target_variable=v,
-                    scaling_component=model.feed_side.properties_in[t].flow_mol_phase_comp["Liq", j],
-                    overwrite=overwrite,
+                # Assume flux is roughly two orders of magnitude smaller than molar flow
+                sf = 100*self.get_scaling_factor(model.feed_side.properties_in[t].flow_mol_phase_comp["Liq", j])
+                self.set_variable_scaling_factor(
+                    v, sf, overwrite=overwrite,
                 )
-
-        for (t, p, j), v in model.feed_side.mass_transfer_term.items():
-            expr = model.flux_mol_phase_comp_avg[t, p, j]*model.area
-
-            sf = self.get_expression_nominal_values(expr)[0]
-            self.set_variable_scaling_factor(v, sf, overwrite=overwrite)
 
     def constraint_scaling_routine(
             self, model, overwrite: bool = False, submodel_scalers: dict = None
@@ -332,7 +714,8 @@ class NanofiltrationData(InitializationMixin, UnitModelBlockData):
         Labban et al., 2017 (http://dx.doi.org/10.1016/j.memsci.2016.08.062)
     """
 
-    default_scaler=NanofiltrationDSPMDE0DScaler
+    default_initializer = NanofiltrationDSPMDE0DInitializer
+    default_scaler = NanofiltrationDSPMDE0DScaler
 
     CONFIG = ConfigBlock()
 

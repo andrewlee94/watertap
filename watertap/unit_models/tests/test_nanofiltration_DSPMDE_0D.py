@@ -2064,8 +2064,10 @@ class TestNFScaler:
 
         scaler.scale_model(m.fs.unit)
 
-        from idaes.core.scaling import report_scaling_factors
+        m.fs.unit.default_initializer().initialize(m.fs.unit, output_level=idaeslog.DEBUG)
+        m.fs.unit.display()
 
+        from idaes.core.scaling import report_scaling_factors
         report_scaling_factors(m.fs.unit, descend_into=True)
 
         from idaes.core.util import DiagnosticsToolbox
