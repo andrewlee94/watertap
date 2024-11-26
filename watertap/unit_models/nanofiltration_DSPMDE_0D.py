@@ -297,35 +297,22 @@ class NanofiltrationDSPMDE0DInitializer(SingleControlVolumeUnitInitializer):
 
         # ---------------------------------------------------------------------
         # Solve unit
-
-        from idaes.core.scaling import report_scaling_factors
-
-        report_scaling_factors(model, descend_into=True)
-
-        from idaes.core.util import DiagnosticsToolbox
-        from pyomo.environ import TransformationFactory
-
-        sm = TransformationFactory("core.scale_model").create_using(model, rename=False)
-        dt2 = DiagnosticsToolbox(model=sm)
-
-        dt2.report_numerical_issues()
-
         with idaeslog.solver_log(solve_log, idaeslog.DEBUG) as slc:
             res = solver.solve(model, tee=slc.tee)
 
-        count = 1
-        while not check_optimal_termination(res) and count < 3:
-            init_log.info("Attempting to resolve")
-
-            for v, val in iscale.badly_scaled_var_generator(model):
-                print(v.name, val)
-                set_scaling_factor(v, abs(value(1/v)))
-
-            res = solver.solve(model, tee=slc.tee)
-
-            dt2.report_numerical_issues()
-
-            count += 1
+        # count = 1
+        # while not check_optimal_termination(res) and count < 3:
+        #     init_log.info("Attempting to resolve")
+        #
+        #     for v, val in iscale.badly_scaled_var_generator(model):
+        #         print(v.name, val)
+        #         set_scaling_factor(v, abs(value(1/v)))
+        #
+        #     res = solver.solve(model, tee=slc.tee)
+        #
+        #     dt2.report_numerical_issues()
+        #
+        #     count += 1
 
         init_log.info("Initialization Completed, {}".format(idaeslog.condition(res)))
 
@@ -504,16 +491,6 @@ class NanofiltrationDSPMDE0DScaler(CustomScalerBase):
             source_state=model.feed_side.properties_in,
             overwrite=overwrite,
         )
-        self.propagate_state_scaling(
-            target_state=model.mixed_permeate,
-            source_state=model.feed_side.properties_in,
-            overwrite=overwrite,
-        )
-        self._prop_state(
-            target_state=model.permeate_side,
-            source_state=model.feed_side.properties_in,
-            overwrite=overwrite,
-        )
         self._prop_state(
             target_state=model.feed_side.properties_interface,
             source_state=model.feed_side.properties_in,
@@ -524,9 +501,24 @@ class NanofiltrationDSPMDE0DScaler(CustomScalerBase):
             source_state=model.feed_side.properties_in,
             overwrite=overwrite,
         )
+
+        # Permeate side
+        self.propagate_state_scaling(
+            target_state=model.mixed_permeate,
+            source_state=model.feed_side.properties_in,
+            overwrite=overwrite,
+        )
+        # Use mixed state scaling for permeate side
+        # this wya, if user sets scaling for permeate outlet
+        # it will be propagated to other permeate states too.
+        self._prop_state(
+            target_state=model.permeate_side,
+            source_state=model.mixed_permeate,
+            overwrite=overwrite,
+        )
         self._prop_state(
             target_state=model.pore_exit,
-            source_state=model.feed_side.properties_in,
+            source_state=model.mixed_permeate,
             overwrite=overwrite,
         )
 

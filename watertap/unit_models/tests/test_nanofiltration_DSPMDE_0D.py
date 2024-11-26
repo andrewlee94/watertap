@@ -1958,6 +1958,139 @@ def test_pressure_recovery_step_5_ions():
 
 
 class TestNFScaler:
+    def base_model(self):
+        m = ConcreteModel()
+        m.fs = FlowsheetBlock(dynamic=False)
+        m.fs.properties = MCASParameterBlock(
+            solute_list=["Ca_2+", "SO4_2-", "Mg_2+", "Na_+", "Cl_-"],
+            diffusivity_data={
+                ("Liq", "Ca_2+"): 9.2e-10,
+                ("Liq", "SO4_2-"): 1.06e-09,
+                ("Liq", "Mg_2+"): 7.06e-10,
+                ("Liq", "Na_+"): 1.33e-09,
+                ("Liq", "Cl_-"): 2.03e-09,
+            },
+            mw_data={
+                "H2O": 0.018,
+                "Ca_2+": 0.04,
+                "Mg_2+": 0.024,
+                "SO4_2-": 0.096,
+                "Na_+": 0.023,
+                "Cl_-": 0.035,
+            },
+            stokes_radius_data={
+                "Ca_2+": 3.09e-10,
+                "Mg_2+": 3.47e-10,
+                "SO4_2-": 2.3e-10,
+                "Cl_-": 1.21e-10,
+                "Na_+": 1.84e-10,
+            },
+            charge={"Ca_2+": 2, "Mg_2+": 2, "SO4_2-": -2, "Na_+": 1, "Cl_-": -1},
+            activity_coefficient_model=ActivityCoefficientModel.davies,
+            density_calculation=DensityCalculation.constant,
+        )
+
+        m.fs.unit = NanofiltrationDSPMDE0D(property_package=m.fs.properties)
+
+        mass_flow_in = 1 * pyunits.kg / pyunits.s
+        feed_mass_frac = {
+            "Ca_2+": 382e-6,
+            "Mg_2+": 1394e-6,
+            "SO4_2-": 2136e-6,
+            "Cl_-": 20101.6e-6,
+            "Na_+": 11122e-6,
+        }
+
+        # Fix mole flow rates of each ion and water
+        for ion, x in feed_mass_frac.items():
+            mol_comp_flow = (
+                    x
+                    * pyunits.kg
+                    / pyunits.kg
+                    * mass_flow_in
+                    / m.fs.unit.feed_side.properties_in[0].mw_comp[ion]
+            )
+            m.fs.unit.inlet.flow_mol_phase_comp[0, "Liq", ion].fix(mol_comp_flow)
+        H2O_mass_frac = 1 - sum(x for x in feed_mass_frac.values())
+        H2O_mol_comp_flow = (
+                H2O_mass_frac
+                * pyunits.kg
+                / pyunits.kg
+                * mass_flow_in
+                / m.fs.unit.feed_side.properties_in[0].mw_comp["H2O"]
+        )
+        m.fs.unit.inlet.flow_mol_phase_comp[0, "Liq", "H2O"].fix(H2O_mol_comp_flow)
+
+        # Use assert electroneutrality method from property model to ensure the ion concentrations provided
+        # obey electroneutrality condition
+        m.fs.unit.feed_side.properties_in[0].assert_electroneutrality(
+            defined_state=True,
+            adjust_by_ion="Cl_-",
+            get_property="mass_frac_phase_comp",
+        )
+
+        # Fix other inlet state variables
+        m.fs.unit.inlet.temperature[0].fix(298.15)
+        m.fs.unit.inlet.pressure[0].fix(4e5)
+
+        # Fix the membrane variables that are usually fixed for the DSPM-DE model
+        m.fs.unit.radius_pore.fix(0.5e-9)
+        m.fs.unit.membrane_thickness_effective.fix(1.33e-6)
+        m.fs.unit.membrane_charge_density.fix(-27)
+        m.fs.unit.dielectric_constant_pore.fix(41.3)
+
+        # Fix final permeate pressure to be ~atmospheric
+        m.fs.unit.mixed_permeate[0].pressure.fix(101325)
+
+        m.fs.unit.spacer_porosity.fix(0.85)
+        m.fs.unit.channel_height.fix(5e-4)
+        m.fs.unit.velocity[0, 0].fix(0.25)
+        m.fs.unit.area.fix(50)
+        # Fix additional variables for calculating mass transfer coefficient with spiral wound correlation
+        m.fs.unit.spacer_mixing_efficiency.fix()
+        m.fs.unit.spacer_mixing_length.fix()
+
+        m.fs.properties.set_default_scaling(
+            "flow_mol_phase_comp", 1e4, index=("Liq", "Ca_2+")
+        )
+        m.fs.properties.set_default_scaling(
+            "flow_mol_phase_comp", 1e3, index=("Liq", "SO4_2-")
+        )
+        m.fs.properties.set_default_scaling(
+            "flow_mol_phase_comp", 1e3, index=("Liq", "Mg_2+")
+        )
+        m.fs.properties.set_default_scaling(
+            "flow_mol_phase_comp", 1e2, index=("Liq", "Cl_-")
+        )
+        m.fs.properties.set_default_scaling(
+            "flow_mol_phase_comp", 1e2, index=("Liq", "Na_+")
+        )
+        m.fs.properties.set_default_scaling(
+            "flow_mol_phase_comp", 1e0, index=("Liq", "H2O")
+        )
+
+        calculate_scaling_factors(m)
+
+        # check that all variables have scaling factors
+        unscaled_var_list = list(unscaled_variables_generator(m.fs.unit))
+        assert len(unscaled_var_list) == 0
+
+        initialization_tester(m, outlvl=idaeslog.DEBUG)
+
+        badly_scaled_var_lst = list(
+            badly_scaled_var_generator(m.fs.unit, small=1e-5, zero=1e-12)
+        )
+        for var, val in badly_scaled_var_lst:
+            print(var.name, val)
+        assert len(badly_scaled_var_lst) == 0
+
+        results = solver.solve(m, tee=True)
+
+        # Check for optimal solution
+        assert_optimal_termination(results)
+
+        return m
+
     @pytest.mark.component
     def test_scaler(self):
         m = ConcreteModel()
@@ -2064,8 +2197,38 @@ class TestNFScaler:
 
         scaler.scale_model(m.fs.unit)
 
-        m.fs.unit.default_initializer().initialize(m.fs.unit, output_level=idaeslog.DEBUG)
-        m.fs.unit.display()
+        # try:
+        #     m.fs.unit.default_initializer().initialize(m.fs.unit, output_level=idaeslog.DEBUG)
+        # except:
+        #     pass
+        # m.fs.unit.display()
+        #
+
+        m2 = self.base_model()
+
+        # var_diff = {}
+        # for v in m.fs.unit.component_data_objects(Var, descend_into=True):
+        #     vname = v.name
+        #     v2 = m2.find_component(vname)
+        #     delta = v.value-v2.value
+        #     if v.value != 0:
+        #         err = delta/v.value
+        #     elif v2.value != 0:
+        #         err = delta/v2.value
+        #     else:
+        #         err = delta
+        #     var_diff[vname] = (err, v.value, v2.value)
+        #
+        # sorted_dict = dict(sorted(var_diff.items(), key=lambda item: abs(item[1][0]), reverse=True))
+        #
+        # for k, v in sorted_dict.items():
+        #     print(k, v)
+
+        # Copy solution from m2 to m to check new scaling
+        for v in m.fs.unit.component_data_objects(Var, descend_into=True):
+            vname = v.name
+            v2 = m2.find_component(vname)
+            v.set_value(v2)
 
         from idaes.core.scaling import report_scaling_factors
         report_scaling_factors(m.fs.unit, descend_into=True)
@@ -2077,5 +2240,7 @@ class TestNFScaler:
         dt2 = DiagnosticsToolbox(model=sm)
 
         dt2.report_numerical_issues()
+        dt2.display_constraints_with_mismatched_terms()
+        dt2.display_constraints_with_canceling_terms()
 
         assert False
